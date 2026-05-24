@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:pineify.app)",
+      "WebFetch(domain:letianzj.github.io)",
+      "WebFetch(domain:www.pressacademia.org)",
+      "WebFetch(domain:www.backtrader.com)",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:hudsonthames.org)",
+      "Bash(pip install *)",
+      "Bash(pip show *)",
+      "Bash(Select-String \"^Name:|^Version:\")",
+      "Bash(python *)",
+      "Bash(pytest *)",
+      "Bash(Get-ChildItem -Force \"C:\\\\Users\\\\ferka\\\\OneDrive\\\\Masaüstü\\\\ec581_proje\\\\data\")",
+      "Bash(Get-ChildItem -Force \"C:\\\\Users\\\\ferka\\\\OneDrive\\\\Masaüstü\\\\ec581_proje\\\\results\")",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(Get-ChildItem -Recurse -Name)",
+      "Bash(Get-ChildItem \"C:\\\\Users\\\\ferka\\\\OneDrive\\\\Masaüstü\\\\ec581_proje\" -Force)",
+      "Bash(Select-Object Name, LastWriteTime)",
+      "Bash(dir \"C:\\\\Users\\\\ferka\\\\OneDrive\\\\Masaüstü\\\\ec581_proje\")",
+      "Bash(jupyter nbconvert *)",
+      "Bash(ls -la)",
+      "Bash(dir)",
+      "Bash(del debug_backtest.py debug_open.py debug_fix.py debug_verify.py)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(echo \"EXIT_CODE: $?\")",
+      "Bash(cp notebook_executed.ipynb notebook.ipynb)",
+      "Bash(rm notebook_executed.ipynb)"
+    ]
+  }
+}
