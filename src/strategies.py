@@ -1,95 +1,105 @@
 # src/strategies.py
 """
-PairsStrategy — Backtrader strategy supporting Distance and Cointegration approaches.
+GGRStrategy — Backtrader implementation of Gatev, Goetzmann & Rouwenhorst (2006).
 """
 
 import backtrader as bt
-from src.indicators import DistanceZScore, CointZScore
 
 
-class PairsStrategy(bt.Strategy):
-    """Long-short pairs trading strategy.
+class GGRStrategy(bt.Strategy):
+    """Pairs trading strategy strictly following GGR (2006).
 
-    params:
-        period       (int)   : Formation window for z-score. Default 60.
-        entry_z      (float) : |z-score| threshold to open position. Default 2.0.
-        exit_z       (float) : |z-score| threshold to close position. Default 1.0.
-        approach     (str)   : 'distance' or 'coint'. Default 'distance'.
-        wait_reversal(bool)  : Wait for z-score to start reverting before entry.
-                               Default False.
-        cash_per_leg (float) : Cash per trade leg. Default 100_000.
+    Requires exactly TWO data feeds added to the Cerebro instance:
+        data0 (self.data)  — leg 1 (stock A)
+        data1              — leg 2 (stock B)
 
-    Trade logic:
-        LONG  pair: z < -entry_z  -> buy spread (buy leg1 proportion)
-        SHORT pair: z >  entry_z  -> sell spread
-        Close long : z > -exit_z
-        Close short: z <  exit_z
+    The spread is defined in normalized price space:
+        spread_t = P*_A_t - P*_B_t,   P*_i_t = P_i_t / P_i_0
+
+    where P_i_0 is the price at the START of the formation period.
+
+    Entry (GGR §2):
+        spread_t >  entry_sigma × locked_sigma  →  short A, long  B
+        spread_t < -entry_sigma × locked_sigma  →  long  A, short B
+
+    Exit (GGR §2):
+        Convergence : close immediately when spread crosses zero.
+        Time-stop   : remaining position is closed at end of data.
+
+    Commission is applied at the broker level — set it in the calling code via
+    cerebro.broker.setcommission(commission=0.001) for 10 bps.
+
+    params
+    ------
+    locked_sigma  float  Formation-period σ of (P*_A - P*_B). Required.
+    p1_0          float  Price of leg1 at formation start.
+    p2_0          float  Price of leg2 at formation start.
+    entry_sigma   float  Entry multiplier (paper: 2.0).
+    cash_per_leg  float  TL allocated per leg (for position sizing).
     """
 
     params = (
-        ("period", 60),
-        ("entry_z", 2.0),
-        ("exit_z", 1.0),
-        ("approach", "distance"),
-        ("wait_reversal", False),
-        ("cash_per_leg", 100_000),
+        ("locked_sigma", 1.0),
+        ("p1_0", 1.0),
+        ("p2_0", 1.0),
+        ("entry_sigma", 2.0),
+        ("cash_per_leg", 1_000_000),
     )
 
     def __init__(self):
-        if self.p.approach == "distance":
-            self.zscore_ind = DistanceZScore(self.data, period=self.p.period)
-        else:
-            self.zscore_ind = CointZScore(self.data, period=self.p.period)
+        self._in_long = False    # long leg1, short leg2
+        self._in_short = False   # short leg1, long leg2
 
-        self._in_long = False
-        self._in_short = False
-
-    def _get_sizes(self):
-        p1 = self.data.price1[0]
-        p2 = self.data.price2[0]
-        size1 = int(self.p.cash_per_leg / p1) if p1 > 0 else 0
-        size2 = int(self.p.cash_per_leg / p2) if p2 > 0 else 0
-        return size1, size2
-
-    def _should_enter(self, z: float, direction: str) -> bool:
-        if direction == "long":
-            crossed = z < -self.p.entry_z
-        else:
-            crossed = z > self.p.entry_z
-
-        if not crossed:
-            return False
-
-        if self.p.wait_reversal:
-            prev_z = self.zscore_ind.zscore[-1]
-            if direction == "long":
-                return z > prev_z
-            else:
-                return z < prev_z
-
-        return True
+    def _spread(self) -> float:
+        p1_star = self.data0.close[0] / self.p.p1_0
+        p2_star = self.data1.close[0] / self.p.p2_0
+        return p1_star - p2_star
 
     def next(self):
-        z = self.zscore_ind.zscore[0]
-        size1, size2 = self._get_sizes()
-
-        if size1 == 0 or size2 == 0:
-            return
+        spread = self._spread()
+        threshold = self.p.entry_sigma * self.p.locked_sigma
 
         if not self._in_long and not self._in_short:
-            if self._should_enter(z, "long"):
-                self.buy(size=size1)
-                self._in_long = True
-            elif self._should_enter(z, "short"):
-                self.sell(size=size1)
+            p1 = self.data0.close[0]
+            p2 = self.data1.close[0]
+            if p1 <= 0 or p2 <= 0:
+                return
+            s1 = int(self.p.cash_per_leg / p1)
+            s2 = int(self.p.cash_per_leg / p2)
+            if s1 == 0 or s2 == 0:
+                return
+
+            if spread > threshold:
+                # Leg1 is the outperformer → short leg1, long leg2
+                self.sell(data=self.data0, size=s1)
+                self.buy(data=self.data1, size=s2)
                 self._in_short = True
+            elif spread < -threshold:
+                # Leg2 is the outperformer → long leg1, short leg2
+                self.buy(data=self.data0, size=s1)
+                self.sell(data=self.data1, size=s2)
+                self._in_long = True
 
         elif self._in_long:
-            if z > -self.p.exit_z:
-                self.close()
+            # Entered when spread < -threshold; exit when spread crosses zero
+            if spread >= 0.0:
+                self.close(data=self.data0)
+                self.close(data=self.data1)
                 self._in_long = False
 
         elif self._in_short:
-            if z < self.p.exit_z:
-                self.close()
+            # Entered when spread > +threshold; exit when spread crosses zero
+            if spread <= 0.0:
+                self.close(data=self.data0)
+                self.close(data=self.data1)
                 self._in_short = False
+
+    def stop(self):
+        # Time-stop: mark any remaining position at end of the trading window.
+        # The order won't fill (no more bars) but broker.getvalue() still
+        # reflects the mark-to-market so total return is computed correctly.
+        if self._in_long or self._in_short:
+            self.close(data=self.data0)
+            self.close(data=self.data1)
+            self._in_long = False
+            self._in_short = False

@@ -1,0 +1,30 @@
+
+Merhaba
+
+Grup sunumları 11 Haziran 10:30'da dersi yaptığımız labda yapılacaktır.
+
+Projelerin tamamlanmasında dikkat edilecek hususlar için ders notları arasında yer alan PROJECTS kısmına bakabilirsiniz.
+
+Sunumlarda 30 dakikalık bir sürede, aşağıdaki konulara değinmenizi bekliyoruz:
+
+İncelediğiniz makalenin özeti
+Kurguladığınız stratejinin detayları (veriler, indiaktörler, sinyaller, positon sizing, stop loss/take profit vb) 
+Bu stratejiyi nasıl kodladığınız (kod örnekleri koyarak) 
+Backtest sonuçlarınıza dair tablo ve grafikler
+Stratejiyi daha da geliştirmek için denediğiniz fikirler ve sonuçları
+Sonuçlara dair genel değerlendirmeniz, bu stratejiye gerçekten yatırım yapar mısınız konusundaki düşünceleriniz
+Hazırladığınız tüm dosyaları 10 Haziran 23:59'a kadar bana iletin lütfen. Bunu iki türlü yapabilirsiniz. Kodlarınızı bir GitHub reposuna kaydedip bana link/paylaşım gönderebilirsiniz. Veya bana mail atabilirsiniz.
+
+Dosyalar ben kodu çalıştırdığımda sizin bulgularınız ile aynı bulgulara ulaşabileceğim şekilde olmalı. 
+
+Dosyalar şunları içermeli:
+
+
+Projede kullanacağınız Python kütüphanelerini bir requirements.txt dosyasına kaydedin. Bu dosyada kütüphane VERSİYONLARI mutlaka olsun. Bu dosyaların çalışma mantığını araştırın lütfen 
+Projede kullandığınız verileri bir csv dosyasına kaydedin lütfen. Örneğin, Yahoo Finance'den veri çekmişseniz, öncelikle bu verileri csv dosyasına kaydedin. Sonra kodun içerisinde verileri bu csv dosyasından okutun. Bu, benim kodlarınızı çalıştırmam sırasında aynı bulgulara ulaşmamı sağlayacaktır.
+Projede .py veya .ipynb uzantılı Python dosyaları kullanabilirsiniz. Bu dosyalardaki kodları kolay anlaşılır biçimde, fonksiyonlar veya class'lar yazarak hazırlayın ve comment ekleyin. 
+Backtrader kütüphanesi kullarak backtest lerinizi gerçekleştirin
+Backtest sonuçlarınızı MUTLAKA dosyalara kaydedin. Bunun için CSV/parquet/pickle dosya türlerini kullanabilirsiniz
+Sunumunuzu da PDF olarak bu dosyaların arasına ekleyin. Sunumda grup katılımcılarının isismleri de olmalı
+Dolayısıyla ben bu dosyaları aldığımda, sizin kullandığınız Python kütüphanelerini yükleyip, sizin kodlarınızı aynı verilerle çalıştırıp aynı sonuçları almam gerekir. Bana göndermeden önce en son siz de bunu kontrol edin lütfen, yeni bir Python session'da kodlarınızı sıfırdan çalıştırıp aynı sonucu aldığınızı teyit edin. 
+Başarılar

@@ -1,104 +1,179 @@
 # tests/test_pairs.py
-import pandas as pd
 import numpy as np
+import pandas as pd
 import pytest
-from src.pairs import construct_pair, test_cointegration, half_life, screen_pairs
+
+from src.pairs import (
+    normalize_prices,
+    compute_ssd,
+    select_top_pairs,
+    compute_locked_sigma,
+    liquidity_filter,
+)
 
 
-def _make_cointegrated_series(n=500, seed=42):
-    """Generate two cointegrated price series for testing."""
-    rng = np.random.default_rng(seed)
-    common = np.cumsum(rng.normal(0, 1, n))
-    s1 = common + rng.normal(0, 0.5, n)
-    s2 = common + rng.normal(0, 0.5, n)
-    idx = pd.date_range("2015-01-01", periods=n, freq="B")
-    return pd.Series(np.exp(s1 / 100), index=idx), pd.Series(np.exp(s2 / 100), index=idx)
+def _prices(data: dict, n: int | None = None) -> pd.DataFrame:
+    length = n if n is not None else len(next(iter(data.values())))
+    idx = pd.date_range("2020-01-01", periods=length, freq="B")
+    return pd.DataFrame(data, index=idx)
 
 
-def _make_random_series(n=500, seed=99):
-    """Generate two independent random walks."""
-    rng = np.random.default_rng(seed)
-    idx = pd.date_range("2015-01-01", periods=n, freq="B")
-    s1 = pd.Series(np.exp(np.cumsum(rng.normal(0, 1, n)) / 100), index=idx)
-    s2 = pd.Series(np.exp(np.cumsum(rng.normal(0, 1, n)) / 100), index=idx)
-    return s1, s2
+# ---------------------------------------------------------------------------
+# normalize_prices
+# ---------------------------------------------------------------------------
+
+class TestNormalizePrices:
+    def test_first_row_is_one(self):
+        df = _prices({"A": [100.0, 110.0, 90.0], "B": [50.0, 55.0, 45.0]})
+        norm = normalize_prices(df)
+        assert norm["A"].iloc[0] == pytest.approx(1.0)
+        assert norm["B"].iloc[0] == pytest.approx(1.0)
+
+    def test_ratios_preserved(self):
+        df = _prices({"A": [100.0, 120.0, 80.0]})
+        norm = normalize_prices(df)
+        pd.testing.assert_series_equal(
+            norm["A"], pd.Series([1.0, 1.2, 0.8], index=df.index), check_names=False
+        )
+
+    def test_nan_in_first_row_handled(self):
+        idx = pd.date_range("2020-01-01", periods=3, freq="B")
+        df = pd.DataFrame({"A": [np.nan, 100.0, 110.0]}, index=idx)
+        norm = normalize_prices(df)
+        # first non-NaN is 100 → second row = 1.0, third = 1.1
+        assert norm["A"].iloc[1] == pytest.approx(1.0)
+        assert norm["A"].iloc[2] == pytest.approx(1.1)
 
 
-class TestConstructPair:
-    def test_ratio_is_price1_over_price2(self):
-        s1, s2 = _make_cointegrated_series()
-        pair = construct_pair(s1, s2, "A", "B")
-        pd.testing.assert_series_equal(pair["Close"], s1 / s2, check_names=False)
+# ---------------------------------------------------------------------------
+# compute_ssd
+# ---------------------------------------------------------------------------
 
-    def test_has_required_columns(self):
-        s1, s2 = _make_cointegrated_series()
-        pair = construct_pair(s1, s2, "A", "B")
-        assert set(pair.columns) == {"Close", "Price1", "Price2"}
+class TestComputeSSD:
+    def test_identical_series_zero_ssd(self):
+        df = _prices({"A": [1.0, 1.1, 1.2], "B": [1.0, 1.1, 1.2]})
+        ssd_df = compute_ssd(df)
+        assert ssd_df["ssd"].iloc[0] == pytest.approx(0.0, abs=1e-10)
 
-    def test_name_attribute(self):
-        s1, s2 = _make_cointegrated_series()
-        pair = construct_pair(s1, s2, "GARAN", "AKBNK")
-        assert pair.attrs["name"] == "GARAN_AKBNK"
+    def test_known_value(self):
+        # A=[1,2], B=[1,1] → diff=[0,1] → SSD=1
+        df = _prices({"A": [1.0, 2.0], "B": [1.0, 1.0]}, n=2)
+        ssd_df = compute_ssd(df)
+        assert ssd_df["ssd"].iloc[0] == pytest.approx(1.0)
 
-    def test_index_preserved(self):
-        s1, s2 = _make_cointegrated_series()
-        pair = construct_pair(s1, s2, "A", "B")
-        pd.testing.assert_index_equal(pair.index, s1.index)
+    def test_sorted_ascending(self):
+        df = _prices({"A": [1.0, 2.0], "B": [1.0, 1.5], "C": [1.0, 5.0]}, n=2)
+        ssd_df = compute_ssd(df)
+        assert list(ssd_df["ssd"]) == sorted(ssd_df["ssd"])
 
+    def test_pair_count(self):
+        n_tickers = 6
+        df = _prices({f"T{i}": [1.0, 1.0] for i in range(n_tickers)}, n=2)
+        ssd_df = compute_ssd(df)
+        assert len(ssd_df) == n_tickers * (n_tickers - 1) // 2
 
-class TestCointegration:
-    def test_cointegrated_pair_low_pvalue(self):
-        s1, s2 = _make_cointegrated_series()
-        result = test_cointegration(s1, s2)
-        assert result["p_value"] < 0.05
+    def test_output_columns(self):
+        df = _prices({"A": [1.0, 1.1], "B": [1.0, 1.2]}, n=2)
+        ssd_df = compute_ssd(df)
+        assert set(ssd_df.columns) == {"ticker1", "ticker2", "ssd"}
 
-    def test_random_pair_high_pvalue(self):
-        s1, s2 = _make_random_series()
-        result = test_cointegration(s1, s2)
-        assert result["p_value"] > 0.05
-
-    def test_result_has_required_keys(self):
-        s1, s2 = _make_cointegrated_series()
-        result = test_cointegration(s1, s2)
-        assert {"t_stat", "p_value", "is_cointegrated"} <= result.keys()
-
-
-class TestHalfLife:
-    def test_half_life_positive(self):
-        s1, s2 = _make_cointegrated_series()
-        spread = s1 / s2
-        hl = half_life(spread)
-        assert hl > 0
-
-    def test_fast_reverting_spread_short_half_life(self):
-        """A spread with strong mean reversion should have a short half-life."""
-        rng = np.random.default_rng(7)
-        n = 500
-        idx = pd.date_range("2015-01-01", periods=n, freq="B")
-        spread = pd.Series(index=idx, dtype=float)
-        spread.iloc[0] = 0.0
-        for i in range(1, n):
-            spread.iloc[i] = spread.iloc[i - 1] * 0.5 + rng.normal(0, 0.1)
-        hl = half_life(spread)
-        assert 0 < hl < 10
+    def test_symmetry(self):
+        # SSD(A,B) == SSD(B,A) — only the upper triangle is returned, but value is symmetric
+        df = _prices({"A": [1.0, 1.3, 0.9], "B": [1.0, 1.0, 1.0]})
+        ssd_df = compute_ssd(df)
+        assert len(ssd_df) == 1  # only one pair
+        assert ssd_df["ssd"].iloc[0] > 0
 
 
-class TestScreenPairs:
-    def test_returns_dataframe(self):
-        s1, s2 = _make_cointegrated_series()
-        prices = pd.concat([s1.rename("A"), s2.rename("B")], axis=1)
-        pairs_to_test = [("A", "B")]
-        result = screen_pairs(prices, pairs_to_test)
-        assert isinstance(result, pd.DataFrame)
+# ---------------------------------------------------------------------------
+# select_top_pairs
+# ---------------------------------------------------------------------------
 
-    def test_cointegrated_pair_passes_screen(self):
-        s1, s2 = _make_cointegrated_series()
-        prices = pd.concat([s1.rename("A"), s2.rename("B")], axis=1)
-        result = screen_pairs(prices, [("A", "B")])
-        assert len(result) == 1
+class TestSelectTopPairs:
+    def test_returns_top_n(self):
+        ssd_df = pd.DataFrame({
+            "ticker1": ["A", "A", "B"],
+            "ticker2": ["B", "C", "C"],
+            "ssd": [0.1, 0.3, 0.5],
+        })
+        top = select_top_pairs(ssd_df, n=2)
+        assert len(top) == 2
 
-    def test_random_pair_filtered_out(self):
-        s1, s2 = _make_random_series()
-        prices = pd.concat([s1.rename("X"), s2.rename("Y")], axis=1)
-        result = screen_pairs(prices, [("X", "Y")])
-        assert len(result) == 0
+    def test_smallest_ssd_first(self):
+        ssd_df = pd.DataFrame({
+            "ticker1": ["A", "A"],
+            "ticker2": ["B", "C"],
+            "ssd": [0.1, 0.9],
+        })
+        top = select_top_pairs(ssd_df, n=2)
+        assert top[0][2] < top[1][2]
+
+    def test_returns_tuples_of_three(self):
+        ssd_df = pd.DataFrame({"ticker1": ["A"], "ticker2": ["B"], "ssd": [0.5]})
+        top = select_top_pairs(ssd_df, n=1)
+        assert isinstance(top[0], tuple) and len(top[0]) == 3
+
+    def test_n_larger_than_df_returns_all(self):
+        ssd_df = pd.DataFrame({"ticker1": ["A"], "ticker2": ["B"], "ssd": [0.5]})
+        top = select_top_pairs(ssd_df, n=50)
+        assert len(top) == 1
+
+
+# ---------------------------------------------------------------------------
+# compute_locked_sigma
+# ---------------------------------------------------------------------------
+
+class TestComputeLockedSigma:
+    def test_zero_spread_gives_zero_sigma(self):
+        df = _prices({"A": [1.0, 1.1, 1.2], "B": [1.0, 1.1, 1.2]})
+        sigmas = compute_locked_sigma(df, [("A", "B", 0.0)])
+        assert sigmas[("A", "B")] == pytest.approx(0.0)
+
+    def test_positive_sigma_for_diverging_pair(self):
+        df = _prices({"A": [1.0, 1.1, 1.2], "B": [1.0, 1.0, 1.0]})
+        sigmas = compute_locked_sigma(df, [("A", "B", 0.0)])
+        assert sigmas[("A", "B")] > 0
+
+    def test_missing_ticker_skipped(self):
+        df = _prices({"A": [1.0, 1.1]}, n=2)
+        sigmas = compute_locked_sigma(df, [("A", "MISSING", 0.0)])
+        assert ("A", "MISSING") not in sigmas
+
+    def test_keys_are_ticker_tuples(self):
+        df = _prices({"X": [1.0, 1.05], "Y": [1.0, 0.95]}, n=2)
+        sigmas = compute_locked_sigma(df, [("X", "Y", 0.1)])
+        assert ("X", "Y") in sigmas
+
+
+# ---------------------------------------------------------------------------
+# liquidity_filter
+# ---------------------------------------------------------------------------
+
+class TestLiquidityFilter:
+    def _make_prices(self, n=5):
+        idx = pd.date_range("2020-01-01", periods=n, freq="B")
+        return pd.DataFrame({"A": [100.0] * n, "B": [50.0] * n}, index=idx)
+
+    def test_complete_prices_pass(self):
+        px = self._make_prices()
+        result = liquidity_filter(px, px.index[0], px.index[-1])
+        assert set(result) == {"A", "B"}
+
+    def test_nan_price_rejected(self):
+        px = self._make_prices()
+        px.iloc[2, 0] = np.nan  # NaN price for A on day 2
+        result = liquidity_filter(px, px.index[0], px.index[-1])
+        assert "A" not in result
+        assert "B" in result
+
+    def test_all_nan_column_rejected(self):
+        px = self._make_prices()
+        px["A"] = np.nan
+        result = liquidity_filter(px, px.index[0], px.index[-1])
+        assert "A" not in result
+
+    def test_no_tickers_with_all_nan(self):
+        idx = pd.date_range("2020-01-01", periods=3, freq="B")
+        px = pd.DataFrame({"A": [np.nan, np.nan, np.nan]}, index=idx)
+        result = liquidity_filter(px, idx[0], idx[-1])
+        assert result == []
