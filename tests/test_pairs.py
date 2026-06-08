@@ -9,6 +9,7 @@ from src.pairs import (
     select_top_pairs,
     compute_locked_sigma,
     liquidity_filter,
+    activity_filter,
 )
 
 
@@ -177,3 +178,46 @@ class TestLiquidityFilter:
         px = pd.DataFrame({"A": [np.nan, np.nan, np.nan]}, index=idx)
         result = liquidity_filter(px, idx[0], idx[-1])
         assert result == []
+
+
+# ---------------------------------------------------------------------------
+# activity_filter
+# ---------------------------------------------------------------------------
+
+class TestActivityFilter:
+    def _make_window(self, n=20):
+        idx = pd.date_range("2020-01-01", periods=n, freq="B")
+        # Active: prices move every day
+        active = pd.Series([100.0 + i * 0.5 for i in range(n)], index=idx)
+        # Dormant: constant price → 100% zero returns
+        dormant = pd.Series([100.0] * n, index=idx)
+        return pd.DataFrame({"ACTIVE": active, "DORMANT": dormant})
+
+    def test_active_stock_passes(self):
+        px = self._make_window()
+        result = activity_filter(px, ["ACTIVE", "DORMANT"])
+        assert "ACTIVE" in result
+
+    def test_dormant_stock_removed(self):
+        px = self._make_window()
+        result = activity_filter(px, ["ACTIVE", "DORMANT"])
+        assert "DORMANT" not in result
+
+    def test_threshold_respected(self):
+        # 5 zero-return days out of 9 returns = ~56% zeros
+        # [100,100,100,100,100,101,102,103,104,105] → first 4 returns are 0
+        idx = pd.date_range("2020-01-01", periods=10, freq="B")
+        prices = [100.0] * 5 + [101.0, 102.0, 103.0, 104.0, 105.0]
+        px = pd.DataFrame({"A": prices}, index=idx)
+        assert activity_filter(px, ["A"], max_zero_frac=0.30) == []
+        assert activity_filter(px, ["A"], max_zero_frac=0.60) == ["A"]
+
+    def test_missing_ticker_skipped(self):
+        px = self._make_window()
+        result = activity_filter(px, ["ACTIVE", "MISSING"])
+        assert "MISSING" not in result
+        assert "ACTIVE" in result
+
+    def test_empty_tickers_returns_empty(self):
+        px = self._make_window()
+        assert activity_filter(px, []) == []

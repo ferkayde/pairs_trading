@@ -47,6 +47,43 @@ def liquidity_filter(
     return [t for t in px_w.columns if px_w[t].notna().all()]
 
 
+def activity_filter(
+    prices_window: pd.DataFrame,
+    tickers: list,
+    max_zero_frac: float = 0.30,
+) -> list:
+    """Remove tickers whose daily returns are zero too often (dormant stocks).
+
+    Yahoo Finance repeats the last known close for days when a stock does not
+    trade, producing zero daily returns rather than NaN. CRSP — used by GGR —
+    records NaN on non-trading days, so dormant stocks were naturally excluded
+    from their universe. This filter replicates that effect.
+
+    A ticker is excluded if the fraction of zero daily-return days in the
+    formation window exceeds max_zero_frac (default 30 %).
+
+    Parameters
+    ----------
+    prices_window : price DataFrame for the formation window.
+    tickers       : list to screen (typically output of liquidity_filter).
+    max_zero_frac : maximum allowed fraction of zero-return days (default 0.30).
+
+    Returns
+    -------
+    list of tickers that pass the activity screen.
+    """
+    result = []
+    for t in tickers:
+        if t not in prices_window.columns:
+            continue
+        returns = prices_window[t].pct_change().dropna()
+        if len(returns) == 0:
+            continue
+        if (returns == 0).mean() <= max_zero_frac:
+            result.append(t)
+    return result
+
+
 def compute_ssd(norm_prices: pd.DataFrame) -> pd.DataFrame:
     """Compute SSD_{A,B} = Σ_t (P*_{A,t} − P*_{B,t})² for all N(N−1)/2 pairs.
 
@@ -74,10 +111,14 @@ def compute_ssd(norm_prices: pd.DataFrame) -> pd.DataFrame:
     }).reset_index(drop=True)
 
 
-def select_top_pairs(ssd_df: pd.DataFrame, n: int = 20) -> list:
-    """Return the top-n pairs ranked by smallest SSD as (ticker1, ticker2, ssd) tuples."""
-    top = ssd_df.head(n)
-    return list(zip(top["ticker1"], top["ticker2"], top["ssd"]))
+def select_top_pairs(ssd_df: pd.DataFrame, n: int = 20, offset: int = 0) -> list:
+    """Return n pairs starting at rank `offset` as (ticker1, ticker2, ssd) tuples.
+
+    offset=0  → ranks 1–20   (Top-20, GGR primary result)
+    offset=100 → ranks 101–120 (GGR control group: no longer profitable)
+    """
+    section = ssd_df.iloc[offset: offset + n]
+    return list(zip(section["ticker1"], section["ticker2"], section["ssd"]))
 
 
 def compute_locked_sigma(norm_prices: pd.DataFrame, pairs: list) -> dict:
