@@ -44,62 +44,95 @@ class GGRStrategy(bt.Strategy):
         ("p2_0", 1.0),
         ("entry_sigma", 2.0),
         ("cash_per_leg", 1_000_000),
+        # GGR Panel B: delay entry/exit by one trading day to avoid bid-ask bounce.
+        # Signal fires on day t; order executes at day t+1 close.
+        ("wait_one_day", False),
     )
 
     def __init__(self):
-        self._in_long = False    # long leg1, short leg2
-        self._in_short = False   # short leg1, long leg2
+        self._in_long = False
+        self._in_short = False
+        self._pending_entry = 0    # +1 or -1: direction queued for next bar
+        self._pending_exit = False # exit queued for next bar
 
     def _spread(self) -> float:
         p1_star = self.data0.close[0] / self.p.p1_0
         p2_star = self.data1.close[0] / self.p.p2_0
         return p1_star - p2_star
 
+    def _execute_entry(self, direction: int) -> None:
+        p1 = self.data0.close[0]
+        p2 = self.data1.close[0]
+        if p1 <= 0 or p2 <= 0:
+            return
+        s1 = int(self.p.cash_per_leg / p1)
+        s2 = int(self.p.cash_per_leg / p2)
+        if s1 == 0 or s2 == 0:
+            return
+        if direction == -1:
+            self.sell(data=self.data0, size=s1)
+            self.buy(data=self.data1, size=s2)
+            self._in_short = True
+        else:
+            self.buy(data=self.data0, size=s1)
+            self.sell(data=self.data1, size=s2)
+            self._in_long = True
+
     def next(self):
         spread = self._spread()
         threshold = self.p.entry_sigma * self.p.locked_sigma
 
-        if not self._in_long and not self._in_short:
-            p1 = self.data0.close[0]
-            p2 = self.data1.close[0]
-            if p1 <= 0 or p2 <= 0:
-                return
-            s1 = int(self.p.cash_per_leg / p1)
-            s2 = int(self.p.cash_per_leg / p2)
-            if s1 == 0 or s2 == 0:
-                return
-
-            if spread > threshold:
-                # Leg1 is the outperformer → short leg1, long leg2
-                self.sell(data=self.data0, size=s1)
-                self.buy(data=self.data1, size=s2)
-                self._in_short = True
-            elif spread < -threshold:
-                # Leg2 is the outperformer → long leg1, short leg2
-                self.buy(data=self.data0, size=s1)
-                self.sell(data=self.data1, size=s2)
-                self._in_long = True
-
-        elif self._in_long:
-            # Entered when spread < -threshold; exit when spread crosses zero
-            if spread >= 0.0:
-                self.close(data=self.data0)
-                self.close(data=self.data1)
-                self._in_long = False
-
-        elif self._in_short:
-            # Entered when spread > +threshold; exit when spread crosses zero
-            if spread <= 0.0:
-                self.close(data=self.data0)
-                self.close(data=self.data1)
-                self._in_short = False
-
-    def stop(self):
-        # Time-stop: mark any remaining position at end of the trading window.
-        # The order won't fill (no more bars) but broker.getvalue() still
-        # reflects the mark-to-market so total return is computed correctly.
-        if self._in_long or self._in_short:
+        # Execute orders that were queued on the previous bar (Panel B delay)
+        if self._pending_exit:
             self.close(data=self.data0)
             self.close(data=self.data1)
             self._in_long = False
             self._in_short = False
+            self._pending_exit = False
+            return  # don't generate new signals on the same bar as exit fill
+
+        if self._pending_entry != 0:
+            self._execute_entry(self._pending_entry)
+            self._pending_entry = 0
+            return  # don't check exit on the same bar as entry fill
+
+        # Exit logic
+        if self._in_long:
+            if spread >= 0.0:
+                if self.p.wait_one_day:
+                    self._pending_exit = True
+                else:
+                    self.close(data=self.data0)
+                    self.close(data=self.data1)
+                    self._in_long = False
+            return
+
+        if self._in_short:
+            if spread <= 0.0:
+                if self.p.wait_one_day:
+                    self._pending_exit = True
+                else:
+                    self.close(data=self.data0)
+                    self.close(data=self.data1)
+                    self._in_short = False
+            return
+
+        # Entry logic (flat and no pending order)
+        if spread > threshold:
+            if self.p.wait_one_day:
+                self._pending_entry = -1
+            else:
+                self._execute_entry(-1)
+        elif spread < -threshold:
+            if self.p.wait_one_day:
+                self._pending_entry = 1
+            else:
+                self._execute_entry(1)
+
+    def stop(self):
+        if self._in_long or self._in_short or self._pending_exit:
+            self.close(data=self.data0)
+            self.close(data=self.data1)
+            self._in_long = False
+            self._in_short = False
+            self._pending_exit = False

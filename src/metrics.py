@@ -1,5 +1,5 @@
 # src/metrics.py
-"""Performance metrics and Monte Carlo significance test."""
+"""Performance metrics and Monte Carlo significance test — GGR (2006) replication."""
 
 from __future__ import annotations
 
@@ -91,4 +91,117 @@ def monte_carlo_test(
         "p_value": p_value,
         "null_mean": float(null_sharpes.mean()),
         "null_std": float(null_sharpes.std()),
+    }
+
+
+def newey_west_tstat(returns: pd.Series, n_lags: int = 6) -> float:
+    """Newey-West (1987) HAC t-statistic for the mean with Bartlett kernel.
+
+    GGR Table 1 uses 6-lag Newey-West standard errors throughout.
+    The corrected variance is: V_NW = γ_0 + 2·Σ_{k=1}^L (1-k/(L+1))·γ_k
+    where γ_k is the sample autocovariance at lag k.
+    """
+    r = np.asarray(returns.dropna(), dtype=float)
+    n = len(r)
+    if n < 2:
+        return 0.0
+    mean = r.mean()
+    demeaned = r - mean
+    gamma0 = np.dot(demeaned, demeaned) / n
+    nw_var = gamma0
+    for k in range(1, min(n_lags, n - 1) + 1):
+        gamma_k = np.dot(demeaned[k:], demeaned[:-k]) / n
+        weight = 1.0 - k / (n_lags + 1.0)
+        nw_var += 2.0 * weight * gamma_k
+    se = np.sqrt(max(nw_var, 0.0) / n)
+    return float(mean / se) if se > 0 else 0.0
+
+
+def return_distribution(returns: pd.Series) -> dict:
+    """GGR Table 1 distribution statistics (monthly returns).
+
+    Returns mean, std, skewness, kurtosis (absolute), min, max,
+    and fraction of periods with negative excess return.
+    """
+    from scipy import stats as sp
+    r = returns.dropna()
+    return {
+        "mean": float(r.mean()),
+        "std": float(r.std()),
+        "skewness": float(sp.skew(r)),
+        "kurtosis": float(sp.kurtosis(r, fisher=False)),  # absolute (not excess)
+        "min": float(r.min()),
+        "max": float(r.max()),
+        "pct_negative": float((r < 0).mean() * 100),
+    }
+
+
+def to_monthly(daily_returns: pd.Series) -> pd.Series:
+    """Compound daily returns to monthly, preserving calendar month boundaries."""
+    return (1 + daily_returns).resample("ME").prod() - 1
+
+
+def excess_monthly(daily_returns: pd.Series, daily_rf: pd.Series) -> pd.Series:
+    """Monthly excess returns: compound both series then subtract."""
+    port_m = to_monthly(daily_returns)
+    rf_m = (1 + daily_rf.reindex(daily_returns.index, method="ffill").fillna(0)).resample("ME").prod() - 1
+    common = port_m.index.intersection(rf_m.index)
+    return port_m.loc[common] - rf_m.loc[common]
+
+
+def value_at_risk(returns: pd.Series, percentiles: tuple = (0.01, 0.05, 0.10, 0.25)) -> dict:
+    """Empirical VAR at given left-tail percentiles (Table 5).
+
+    Returns percentile thresholds, probability of negative return,
+    serial correlation, and minimum historical observation.
+    """
+    r = returns.dropna()
+    result = {f"VAR_{int(p*100)}pct": float(r.quantile(p)) for p in percentiles}
+    result["prob_negative"] = float((r < 0).mean())
+    result["serial_corr"] = float(r.autocorr(lag=1)) if len(r) > 1 else 0.0
+    result["min_obs"] = float(r.min())
+    return result
+
+
+def factor_regression(
+    returns: pd.Series,
+    factors: pd.DataFrame,
+    n_lags: int = 6,
+) -> dict:
+    """OLS regression of returns on risk factors with Newey-West SE (Table 4).
+
+    Parameters
+    ----------
+    returns : monthly excess return series
+    factors : DataFrame of monthly factor returns (Mkt-RF, SMB, HML, Mom, Rev)
+    n_lags  : Newey-West lags (GGR: 6)
+
+    Returns
+    -------
+    dict with params, tstat (both as dicts), rsquared, nobs
+    """
+    try:
+        from statsmodels.regression.linear_model import OLS
+        from statsmodels.tools.tools import add_constant
+        from statsmodels.stats.sandwich_covariance import cov_hac
+    except ImportError:
+        return {"error": "statsmodels required for factor regression"}
+
+    common = returns.index.intersection(factors.index)
+    if len(common) < 20:
+        return {"error": f"insufficient observations ({len(common)})"}
+
+    y = returns.loc[common].values
+    X = add_constant(factors.loc[common].values, has_constant="add")
+    model = OLS(y, X).fit()
+    cov = cov_hac(model, nlags=n_lags)
+    se = np.sqrt(np.diag(cov))
+    tstat = model.params / np.where(se > 0, se, np.nan)
+
+    col_names = ["intercept"] + list(factors.columns)
+    return {
+        "params": dict(zip(col_names, model.params)),
+        "tstat": dict(zip(col_names, tstat)),
+        "rsquared": float(model.rsquared),
+        "nobs": int(model.nobs),
     }
