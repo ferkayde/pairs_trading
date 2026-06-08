@@ -1,0 +1,4 @@
+Sector,Tickers,Avg monthly FI (%),t-stat (NW),Sharpe,Windows
+Utilities,31,0.0295,2.3,0.371,419
+Financials,107,0.097,5.3,1.065,419
+Industrials,361,0.0789,4.63,0.943,419

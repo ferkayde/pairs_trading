@@ -10,9 +10,13 @@ Note: this introduces survivorship bias (only current constituents), consistent
 with our BIST implementation.
 """
 
+import io
+import requests
 import yfinance as yf
 import pandas as pd
 from pathlib import Path
+
+_WIKI_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; research-bot/1.0)"}
 
 START = "1990-01-01"
 PRICES_PATH = Path("data/prices.csv")
@@ -37,10 +41,16 @@ GICS_TO_GGR = {
 }
 
 
+def _fetch_sp500_table() -> pd.DataFrame:
+    """Fetch S&P 500 Wikipedia table, bypassing 403 with a browser User-Agent."""
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    html = requests.get(url, headers=_WIKI_HEADERS, timeout=30).text
+    return pd.read_html(io.StringIO(html))[0]
+
+
 def load_sp500_tickers() -> list:
     """Scrape current S&P 500 tickers from Wikipedia."""
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url)[0]
+    table = _fetch_sp500_table()
     tickers = table["Symbol"].tolist()
     # Yahoo Finance uses '-' not '.' for tickers like BRK.B -> BRK-B
     return [t.replace(".", "-") for t in tickers]
@@ -48,8 +58,7 @@ def load_sp500_tickers() -> list:
 
 def load_sp500_sectors() -> pd.DataFrame:
     """Return DataFrame mapping Yahoo Finance ticker -> GGR sector group."""
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    table = pd.read_html(url)[0]
+    table = _fetch_sp500_table()
     df = table[["Symbol", "GICS Sector"]].copy()
     df["Symbol"] = df["Symbol"].str.replace(".", "-", regex=False)
     df["ggr_sector"] = df["GICS Sector"].map(GICS_TO_GGR).fillna("Industrials")
@@ -67,43 +76,58 @@ def download_ff_factors(start: str = START) -> pd.DataFrame:
     Downloads: Mkt-RF, SMB, HML (F-F 3-factor) + Momentum + Short-Term Reversal.
     GGR Table 4 uses all five factors in their risk-regression.
 
-    Requires pandas_datareader. Falls back to a warning if unavailable.
+    Fetches ZIP files directly from the French data library (no pandas_datareader).
     Returns daily factor returns as fractions (not percentages).
     """
-    try:
-        import pandas_datareader.data as web
-    except ImportError:
-        print("pandas_datareader not installed — skipping FF factor download.")
-        print("Install with: pip install pandas-datareader")
-        return pd.DataFrame()
+    import zipfile
+
+    BASE = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+    sources = {
+        "ff3":   ("F-F_Research_Data_Factors_daily_CSV.zip",  "F-F_Research_Data_Factors_daily.csv"),
+        "mom":   ("F-F_Momentum_Factor_daily_CSV.zip",        "F-F_Momentum_Factor_daily.csv"),
+        "strev": ("F-F_ST_Reversal_Factor_daily_CSV.zip",     "F-F_ST_Reversal_Factor_daily.csv"),
+    }
 
     print("Downloading Fama-French daily factors from Ken French data library ...")
     dfs = {}
-    sources = {
-        "ff3":  "F-F_Research_Data_Factors_daily",
-        "mom":  "F-F_Momentum_Factor_daily",
-        "strev":"F-F_ST_Reversal_Factor_daily",
-    }
-    for key, name in sources.items():
+    for key, (zipname, csvname) in sources.items():
         try:
-            raw = web.DataReader(name, "famafrench", start=start)[0]
-            raw.index = pd.to_datetime(raw.index, format="%Y%m%d")
-            dfs[key] = raw / 100.0    # convert from % to fractions
-            print(f"  {name}: {len(raw)} days")
+            resp = requests.get(BASE + zipname, timeout=60)
+            resp.raise_for_status()
+            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                with zf.open(csvname) as f:
+                    # French CSV files have a header block before the data; skip rows
+                    # until we find the line starting with a date (YYYYMMDD integer).
+                    raw_text = f.read().decode("utf-8", errors="replace")
+            lines = raw_text.splitlines()
+            # Find first data row: starts with an 8-digit date
+            skip = next(i for i, l in enumerate(lines) if l.strip()[:8].isdigit())
+            # Find last data row: blank line or second header block after the data
+            end = next(
+                (i for i in range(skip, len(lines)) if lines[i].strip() == ""),
+                len(lines),
+            )
+            csv_block = "\n".join(lines[skip - 1 : end])  # include column header row
+            df = pd.read_csv(io.StringIO(csv_block), index_col=0)
+            df.index = pd.to_datetime(df.index.astype(str).str.strip(), format="%Y%m%d", errors="coerce")
+            df = df[df.index.notna()].sort_index()
+            df = df / 100.0  # % -> fractions
+            dfs[key] = df
+            print(f"  {csvname}: {len(df)} days")
         except Exception as e:
-            print(f"  WARNING: could not download {name}: {e}")
+            print(f"  WARNING: could not download {zipname}: {e}")
 
     if not dfs:
         return pd.DataFrame()
 
-    # Combine into single DataFrame
     factors = dfs.get("ff3", pd.DataFrame())
-    if "mom" in dfs:
+    if "mom" in dfs and "Mom" in dfs["mom"].columns:
         factors = factors.join(dfs["mom"][["Mom"]], how="left")
     if "strev" in dfs:
-        factors = factors.join(dfs["strev"][["ST_Rev"]], how="left")
+        st_col = [c for c in dfs["strev"].columns if "rev" in c.lower() or "st" in c.lower()]
+        if st_col:
+            factors = factors.join(dfs["strev"][[st_col[0]]].rename(columns={st_col[0]: "ST_Rev"}), how="left")
 
-    # Keep Mkt-RF, SMB, HML, Mom, ST_Rev (drop RF — already used for excess returns)
     keep = [c for c in ["Mkt-RF", "SMB", "HML", "Mom", "ST_Rev"] if c in factors.columns]
     factors = factors[keep].dropna(how="all")
 
