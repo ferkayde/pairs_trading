@@ -161,24 +161,53 @@ _TCMB_SHOCK_DECISIONS = [
 ]
 
 
+def load_tcmb_survey(csv_path: str) -> pd.Series:
+    """Load the TCMB Survey of Market Participants policy-rate expectation.
+
+    EVDS path: Statistics → EVDS → Expectations & Trend Surveys → Market
+    Participants Survey → "Repo rate expectation (current month / next MPC)".
+    The CSV is expected with a date column (monthly) and the expected 1-week
+    repo rate as the value (first two columns are used), exactly like the CPI
+    loader.  Returned as a monthly Series indexed by month-end.
+    """
+    raw = pd.read_csv(csv_path)
+    date_col, val_col = raw.columns[0], raw.columns[1]
+    s = pd.Series(
+        pd.to_numeric(raw[val_col], errors="coerce").values,
+        index=pd.to_datetime(raw[date_col], errors="coerce"),
+        name="expected_rate",
+    ).dropna().sort_index()
+    # snap to month-end so it aligns with a decision's calendar month
+    s.index = s.index + pd.offsets.MonthEnd(0)
+    return s[~s.index.duplicated(keep="last")]
+
+
 def load_tcmb_decisions(
     csv_path: str | None = None,
     surprise_bp: float = 150.0,
+    survey_csv: str | None = None,
+    survey_surprise_bp: float = 50.0,
 ) -> pd.DataFrame:
     """TCMB surprise/emergency decision calendar.
 
-    Two modes:
+    Modes:
 
-    1. csv_path given → REAL data.  The CSV is the full history of policy-rate
-       *changes* (one row per change: date, new 1-week-repo rate).  We compute
-       each change's size and keep only the SURPRISE moves — those of magnitude
-       >= `surprise_bp` basis points (default 150 bp).  Routine 25-100 bp steps
-       are ignored; only the market-shaking moves (the 2014 midnight hike, the
-       2018 / 2021 / 2023 crises, etc.) become shock events.
+    1. csv_path + survey_csv → TRUE surprise (best).  Surprise of each decision
+       = actual new rate − consensus expectation from the TCMB Survey of Market
+       Participants for that decision's month.  A decision is a shock when
+       |surprise| >= `survey_surprise_bp` bp (default 50 bp, per ideas.md).
+       This is the correct definition: it flags decisions the market did NOT
+       expect, not merely large-but-anticipated moves.  Decisions with no survey
+       value (early years before the survey published rate expectations) fall
+       back to the magnitude rule below.
 
-    2. csv_path None → fall back to the curated _TCMB_SHOCK_DECISIONS list.
+    2. csv_path only → MAGNITUDE proxy.  Keep moves of size >= `surprise_bp`
+       (default 150 bp).  Used when no survey is available.
 
-    Returns a DataFrame with columns [date, old_rate, new_rate, change_bp, note].
+    3. csv_path None → curated _TCMB_SHOCK_DECISIONS fallback list.
+
+    Returns a DataFrame with columns [date, old_rate, new_rate, change_bp, note]
+    (plus expected_rate, surprise_bp when a survey is used).
     """
     if csv_path is not None:
         raw = pd.read_csv(csv_path)
@@ -187,15 +216,45 @@ def load_tcmb_decisions(
         raw["old_rate"] = raw["rate"].shift(1)
         raw["new_rate"] = raw["rate"]
         raw["change_bp"] = (raw["new_rate"] - raw["old_rate"]) * 100.0
-        # First row has no prior rate → drop it; then keep only big moves.
-        surprises = raw.dropna(subset=["old_rate"]).copy()
-        surprises = surprises[surprises["change_bp"].abs() >= surprise_bp]
-        surprises["note"] = surprises["change_bp"].apply(
+        dec = raw.dropna(subset=["old_rate"]).copy()
+
+        if survey_csv is not None:
+            survey = load_tcmb_survey(survey_csv).sort_index()
+            # Survey series: "Current month-end 1-week repo rate expectation".
+            # The survey for month M is published ~3rd week of M and forecasts the
+            # rate at the END of month M — i.e. the outcome of month M's late-month
+            # MPC meeting, formed BEFORE that meeting.  So each decision is aligned
+            # to its OWN calendar month's survey value (the pre-meeting consensus).
+            # No result-inflating look-ahead: in the rare case a meeting predates
+            # that month's survey, the expectation would embed the decision and the
+            # surprise shrinks toward 0 — we UNDER-flag, never over-flag.
+            svy_by_month = {d.to_period("M"): v for d, v in survey.items()}
+            dec["expected_rate"] = dec["date"].dt.to_period("M").map(svy_by_month)
+            dec["surprise_bp"] = (dec["new_rate"] - dec["expected_rate"]) * 100.0
+            has_exp = dec["expected_rate"].notna()
+            # TRUE surprise where we have a survey value; magnitude fallback else.
+            keep = (
+                (has_exp & (dec["surprise_bp"].abs() >= survey_surprise_bp))
+                | (~has_exp & (dec["change_bp"].abs() >= surprise_bp))
+            )
+            sur = dec[keep].copy()
+
+            def _note(r):
+                if pd.notna(r["expected_rate"]):
+                    return (f"Surprise vs survey: actual {r['new_rate']:.1f}% "
+                            f"vs exp {r['expected_rate']:.1f}% ({r['surprise_bp']:+.0f}bp)")
+                return f"Large move ({r['change_bp']:+.0f}bp, no survey)"
+
+            sur["note"] = sur.apply(_note, axis=1)
+            return sur[["date", "old_rate", "new_rate", "change_bp",
+                        "expected_rate", "surprise_bp", "note"]].reset_index(drop=True)
+
+        # Magnitude proxy (no survey)
+        sur = dec[dec["change_bp"].abs() >= surprise_bp].copy()
+        sur["note"] = sur["change_bp"].apply(
             lambda b: f"Surprise {'hike' if b > 0 else 'cut'} ({b:+.0f}bp)"
         )
-        return surprises[
-            ["date", "old_rate", "new_rate", "change_bp", "note"]
-        ].reset_index(drop=True)
+        return sur[["date", "old_rate", "new_rate", "change_bp", "note"]].reset_index(drop=True)
 
     rows = []
     for d, old, new, note in _TCMB_SHOCK_DECISIONS:
@@ -265,10 +324,19 @@ def build_shock_calendar(
         for d in fx_ret.index[fx_ret.abs() > fx_threshold]:
             _block_after(pd.Timestamp(d), fx_block_days)
 
-    # Trigger 3 — High CPI print (monthly jump above prior month)
+    # Trigger 3 — Surprisingly high CPI print.
+    #   A fixed "MoM > 2%" rule is wrong for Türkiye: in 2022-23 monthly CPI was
+    #   routinely 3-7%, so that rule fires almost every month and just turns the
+    #   strategy off in high-inflation years rather than flagging shocks.  We use
+    #   a RELATIVE threshold instead: block only when the month's MoM exceeds its
+    #   own trailing-12-month average MoM by more than `cpi_jump_threshold`
+    #   (i.e. an unusually high print relative to the prevailing inflation trend).
+    #   The trailing mean is shifted by one month so it uses only past data.
     if cpi_monthly is not None and len(cpi_monthly) > 1:
         mom = cpi_monthly.pct_change()
-        for d in mom.index[mom > cpi_jump_threshold]:
+        trend = mom.rolling(12, min_periods=3).mean().shift(1)
+        surprise = mom - trend
+        for d in surprise.index[surprise > cpi_jump_threshold]:
             _block_after(pd.Timestamp(d), cpi_block_days)
 
     return pd.DatetimeIndex(sorted(blocked))
