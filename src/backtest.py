@@ -87,7 +87,6 @@ def run_ggr_pair_backtest(
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe",
                         riskfreerate=0.0, annualize=True, timeframe=bt.TimeFrame.Days)
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="dd")
-    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
 
     result = cerebro.run()
@@ -95,8 +94,10 @@ def run_ggr_pair_backtest(
 
     sharpe_raw = strat.analyzers.sharpe.get_analysis().get("sharperatio", None)
     dd_raw = strat.analyzers.dd.get_analysis()
-    trade_raw = strat.analyzers.trades.get_analysis()
     time_return_raw = strat.analyzers.timereturn.get_analysis()
+    # Pair round trips from the strategy's own log — TradeAnalyzer counts the
+    # two legs of one pair position as two separate trades.
+    n_round_trips = len(getattr(strat, "trade_log", []))
 
     try:
         fv = cerebro.broker.getvalue()
@@ -108,7 +109,7 @@ def run_ggr_pair_backtest(
         "sharpe": sharpe_raw if sharpe_raw is not None else 0.0,
         "max_drawdown_pct": dd_raw.get("max", {}).get("drawdown", 0.0),
         "total_return_pct": (final_value / initial_cash - 1) * 100,
-        "n_trades": trade_raw.get("total", {}).get("closed", 0),
+        "n_trades": n_round_trips,
         "final_value": final_value,
         "equity_curve": pd.Series(time_return_raw),
     }
@@ -262,18 +263,29 @@ def _bt_pair_returns(
     commission_bps: float = 10.0,
     cash_per_leg: float = 1_000_000,
     wait_one_day: bool = False,
+    strategy_cls=None,
+    extra_params: dict | None = None,
 ) -> tuple:
     """Lightweight Backtrader run for the portfolio loop.
 
-    Runs GGRStrategy on one pair over one trading window.
-    Returns (daily_returns: pd.Series, n_trades: int).
+    Runs GGRStrategy (or `strategy_cls`, e.g. CointStrategy with
+    extra_params={'beta': ..., 'alpha': ...}) on one pair over one trading
+    window.  Returns (daily_returns: pd.Series, n_trades: int, trade_log: list).
 
     Skips the heavy SharpeRatio and DrawDown analyzers used in
-    run_ggr_pair_backtest — only TimeReturn and TradeAnalyzer are attached,
-    keeping per-call overhead low across hundreds of windows × 20 pairs.
+    run_ggr_pair_backtest — only TimeReturn is attached, keeping per-call
+    overhead low across hundreds of windows × 20 pairs.
 
-    Daily returns come from Backtrader's TimeReturn analyzer (daily portfolio
-    return relative to initial_cash = 4 × cash_per_leg).
+    n_trades counts PAIR round trips (from the strategy's trade_log), not
+    Backtrader's per-leg trade count — closing one pair position closes two
+    legs, which TradeAnalyzer would count as two trades.
+
+    Return basis: TimeReturn measures P&L relative to total broker value
+    (initial cash = 4 × cash_per_leg), while GGR — and simulate_pair_returns —
+    express the pair's P&L per $1 of one leg.  The TimeReturn series is
+    therefore rescaled by (4 × cash_per_leg) / cash_per_leg = 4 so both
+    engines share the GGR convention and are directly comparable to the
+    paper's Table 1 levels.
     """
     def _ohlcv(prices: pd.Series) -> pd.DataFrame:
         df = pd.DataFrame({
@@ -288,7 +300,7 @@ def _bt_pair_returns(
     df1, df2 = df1.loc[common], df2.loc[common]
 
     if len(common) < 5:
-        return pd.Series(dtype=float), 0
+        return pd.Series(dtype=float), 0, []
 
     cerebro = bt.Cerebro()
     cerebro.broker.setcash(cash_per_leg * 4)
@@ -300,30 +312,33 @@ def _bt_pair_returns(
     cerebro.adddata(btfeeds.PandasData(dataname=df2), name="leg2")
 
     cerebro.addstrategy(
-        GGRStrategy,
+        strategy_cls or GGRStrategy,
         locked_sigma=locked_sigma,
         p1_0=p1_0,
         p2_0=p2_0,
         entry_sigma=entry_sigma,
         cash_per_leg=cash_per_leg,
         wait_one_day=wait_one_day,
+        **(extra_params or {}),
     )
 
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
-    cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
 
     result = cerebro.run()
     strat = result[0]
 
     time_return_raw = strat.analyzers.timereturn.get_analysis()
-    trade_raw = strat.analyzers.trades.get_analysis()
-    n_trades = trade_raw.get("total", {}).get("closed", 0)
+    trade_log = list(getattr(strat, "trade_log", []))
+    n_trades = len(trade_log)
 
     ec = pd.Series(time_return_raw)
     if len(ec) > 0:
         ec.index = pd.DatetimeIndex([pd.Timestamp(d) for d in ec.index])
+        # Rescale from P&L/(4×cash_per_leg) to P&L/cash_per_leg — GGR's
+        # per-$1-of-one-leg convention (see docstring).
+        ec = ec * 4.0
 
-    return ec, n_trades
+    return ec, n_trades, trade_log
 
 
 def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
@@ -338,9 +353,19 @@ def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
     pair_offset: int = 0,
     use_backtrader: bool = True,
     wait_one_day: bool = False,
+    method: str = "distance",
+    coint_pval: float = 0.05,
+    coint_candidates: int = 100,
     verbose: bool = True,
 ) -> dict:
     """Full GGR (2006) walk-forward overlapping portfolio simulation.
+
+    method="distance" (default) is the GGR SSD rule.  method="cointegration"
+    replaces pair selection and the trading spread with the Engle-Granger
+    procedure: pairs are pre-ranked by SSD (top `coint_candidates`), screened
+    by the EG test (p < coint_pval), and traded on the EG residual spread
+    ln(P_A) − β·ln(P_B) − α via CointStrategy.  The cointegration method
+    always runs through Backtrader.
 
     Steps through history monthly. For each step:
         1. Liquidity filter — GGR criterion: complete price history in formation window.
@@ -382,8 +407,15 @@ def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
     from src.pairs import (
         normalize_prices, compute_ssd, select_top_pairs,
         compute_locked_sigma, liquidity_filter, activity_filter,
+        select_cointegrated_pairs,
     )
     from src.metrics import sharpe_ratio, max_drawdown
+    from src.strategies import CointStrategy
+
+    if method not in ("distance", "cointegration"):
+        raise ValueError(f"unknown method {method!r}")
+    if method == "cointegration":
+        use_backtrader = True   # course requirement: trading runs in Backtrader
 
     all_dates = prices.index
     n_total = len(all_dates)
@@ -422,11 +454,23 @@ def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
 
         # 3. Exhaustive SSD + top pairs (with optional rank offset for control groups)
         ssd_df = compute_ssd(norm_form)
-        available = max(0, len(ssd_df) - pair_offset)
-        top_pairs = select_top_pairs(ssd_df, n=min(top_n, available), offset=pair_offset)
+        eg_params: dict = {}
+        if method == "cointegration":
+            # SSD pre-rank → Engle-Granger screen → best p-values
+            candidates = select_top_pairs(
+                ssd_df, n=min(coint_candidates, len(ssd_df)), offset=pair_offset)
+            top_pairs, eg_params = select_cointegrated_pairs(
+                prices.loc[f_start:f_end, liquid], candidates,
+                n=top_n, pval_threshold=coint_pval)
+        else:
+            available = max(0, len(ssd_df) - pair_offset)
+            top_pairs = select_top_pairs(ssd_df, n=min(top_n, available), offset=pair_offset)
 
-        # 4. Locked σ
-        sigmas = compute_locked_sigma(norm_form, top_pairs)
+        # 4. Locked σ — formation SSD-spread std (distance) or EG residual std (coint)
+        if method == "cointegration":
+            sigmas = {k: v["sigma_eg"] for k, v in eg_params.items()}
+        else:
+            sigmas = compute_locked_sigma(norm_form, top_pairs)
         p0_row = prices.loc[f_start]
 
         # 5. Simulate each pair over trading window
@@ -452,12 +496,18 @@ def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
                 continue
 
             if use_backtrader:
-                rets, n_t = _bt_pair_returns(
+                if method == "cointegration":
+                    eg = eg_params[(t1, t2)]
+                    strategy_cls = CointStrategy
+                    extra_params = {"beta": eg["beta"], "alpha": eg["alpha"]}
+                else:
+                    strategy_cls, extra_params = None, None
+                rets, n_t, pair_tlog = _bt_pair_returns(
                     tp1.loc[common], tp2.loc[common],
                     p1_0, p2_0, sigma, entry_sigma, commission_bps, cash_per_leg,
                     wait_one_day=wait_one_day,
+                    strategy_cls=strategy_cls, extra_params=extra_params,
                 )
-                pair_tlog = []
             else:
                 rets, n_t, pair_tlog = simulate_pair_returns(
                     tp1.loc[common], tp2.loc[common],
@@ -467,8 +517,13 @@ def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
 
             if len(rets) == 0:
                 continue
-            pair_series.append(rets)
-            n_active += 1
+            # GGR §2.3: "fully invested" divides by pairs that actually OPEN a
+            # position during the trading interval, "committed" by all top_n
+            # slots.  A pair with price data but no trades belongs only to the
+            # committed denominator.
+            pair_series.append((rets, n_t > 0))
+            if n_t > 0:
+                n_active += 1
             n_trades_total += n_t
             all_trade_logs.extend(pair_tlog)
 
@@ -476,14 +531,22 @@ def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
             start_idx += roll_days
             continue
 
-        # Average over top_n slots; pad with zeros for inactive pairs (committed capital)
-        # Also record fully-invested (average over active pairs only, no padding).
+        # Committed capital: average over all top_n slots (zero-padded).
+        # Fully invested: average only over pairs that opened a trade (GGR §2.3).
         trading_idx = prices.loc[t_start:t_end].index
-        pair_matrix = pd.DataFrame(pair_series).T.reindex(trading_idx, fill_value=0.0)
-        window_fully_invested = pair_matrix.mean(axis=1)   # active pairs only
+        all_rets    = [r for r, _ in pair_series]
+        traded_rets = [r for r, traded in pair_series if traded]
+
+        pair_matrix = pd.DataFrame(all_rets).T.reindex(trading_idx, fill_value=0.0)
         while len(pair_matrix.columns) < top_n:
             pair_matrix[f"_pad_{len(pair_matrix.columns)}"] = 0.0
-        window_committed = pair_matrix.mean(axis=1)        # committed capital
+        window_committed = pair_matrix.mean(axis=1)
+
+        if traded_rets:
+            fi_matrix = pd.DataFrame(traded_rets).T.reindex(trading_idx, fill_value=0.0)
+            window_fully_invested = fi_matrix.mean(axis=1)
+        else:
+            window_fully_invested = pd.Series(0.0, index=trading_idx)
         window_series.append((window_committed, window_fully_invested))
 
         # Aggregate trade-log statistics for Table 2
@@ -546,14 +609,19 @@ def run_ggr_portfolio(  # noqa: PLR0912, PLR0915
     port_rets,   equity_curve   = _aggregate(committed_series)
     fi_rets,     fi_equity      = _aggregate(fully_inv_series)
 
+    # Sharpe is computed on the full daily series, zeros included: under the
+    # committed-capital convention a flat day is a real 0% return, and the
+    # equity curve / max drawdown already use the full series.  Dropping zeros
+    # (former behaviour) inflated the daily mean and made the Sharpe
+    # inconsistent with the equity curve it is reported next to.
     return {
         "portfolio_returns": port_rets,
         "equity_curve": equity_curve,
         "fully_invested_returns": fi_rets,
         "fully_invested_equity": fi_equity,
         "n_windows": len(window_series),
-        "sharpe": sharpe_ratio(port_rets.replace(0, np.nan).dropna()),
-        "fully_invested_sharpe": sharpe_ratio(fi_rets.replace(0, np.nan).dropna()),
+        "sharpe": sharpe_ratio(port_rets),
+        "fully_invested_sharpe": sharpe_ratio(fi_rets),
         "max_drawdown": max_drawdown(equity_curve),
         "total_return_pct": float((equity_curve.iloc[-1] - 1) * 100),
         "fully_invested_return_pct": float((fi_equity.iloc[-1] - 1) * 100),

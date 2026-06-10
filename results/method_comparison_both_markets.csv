@@ -1,0 +1,5 @@
+Market,Method,"Net P/L (%, committed)",Ann. return (%),Ann. vol (%),Sharpe (committed),Sharpe (fully invested),Sortino,Max drawdown (%),% positive months,Avg pairs traded / window,Avg round-trips / pair
+"US (S&P 500, 0 bps)",Distance (GGR SSD),144.46,2.58,3.12,0.828,0.827,1.275,6.84,55.2,19.5,1.72
+"US (S&P 500, 0 bps)",Cointegration (Engle-Granger),209.06,3.27,3.99,0.82,0.824,1.264,9.18,59.2,19.8,1.83
+BIST (10 bps),Distance (GGR SSD),613.09,13.07,10.26,1.274,1.27,1.957,20.06,61.3,19.76,1.99
+BIST (10 bps),Cointegration (Engle-Granger),727.07,14.13,11.35,1.245,1.234,1.928,26.43,59.1,19.8,2.02

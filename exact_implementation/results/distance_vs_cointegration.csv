@@ -1,0 +1,3 @@
+Method,"Net P/L (%, committed)",Ann. return (%),Ann. vol (%),Sharpe (committed),Sharpe (fully invested),Sortino,Max drawdown (%),% positive months,Avg pairs traded / window,Avg round-trips / pair
+Distance (GGR SSD),144.46,2.58,3.12,0.828,0.827,1.275,6.84,55.2,19.5,1.72
+Cointegration (Engle-Granger),209.06,3.27,3.99,0.82,0.824,1.264,9.18,59.2,19.8,1.83

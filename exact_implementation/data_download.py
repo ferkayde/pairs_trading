@@ -128,7 +128,9 @@ def download_ff_factors(start: str = START) -> pd.DataFrame:
         if st_col:
             factors = factors.join(dfs["strev"][[st_col[0]]].rename(columns={st_col[0]: "ST_Rev"}), how="left")
 
-    keep = [c for c in ["Mkt-RF", "SMB", "HML", "Mom", "ST_Rev"] if c in factors.columns]
+    # RF (daily T-bill) is kept so the notebook can compute genuine excess
+    # returns without depending on a live ^IRX download.
+    keep = [c for c in ["Mkt-RF", "SMB", "HML", "Mom", "ST_Rev", "RF"] if c in factors.columns]
     factors = factors[keep].dropna(how="all")
 
     FF_PATH.parent.mkdir(parents=True, exist_ok=True)

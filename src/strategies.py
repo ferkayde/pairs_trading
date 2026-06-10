@@ -54,6 +54,12 @@ class GGRStrategy(bt.Strategy):
         self._in_short = False
         self._pending_entry = 0    # +1 or -1: direction queued for next bar
         self._pending_exit = False # exit queued for next bar
+        # Pair-level round-trip log for GGR Table 2 statistics.
+        # One dict per round trip: entry_spread_pct (|spread|×100 at open)
+        # and holding_days (bars between open and close).
+        self.trade_log: list = []
+        self._entry_bar = None
+        self._entry_spread = None
 
     def _spread(self) -> float:
         p1_star = self.data0.close[0] / self.p.p1_0
@@ -77,6 +83,18 @@ class GGRStrategy(bt.Strategy):
             self.buy(data=self.data0, size=s1)
             self.sell(data=self.data1, size=s2)
             self._in_long = True
+        self._entry_bar = len(self)
+        self._entry_spread = abs(self._spread())
+
+    def _log_close(self) -> None:
+        if self._entry_bar is not None:
+            self.trade_log.append({
+                "entry_spread_pct": float(self._entry_spread * 100)
+                                    if self._entry_spread else 0.0,
+                "holding_days": len(self) - self._entry_bar,
+            })
+        self._entry_bar = None
+        self._entry_spread = None
 
     def next(self):
         spread = self._spread()
@@ -86,6 +104,7 @@ class GGRStrategy(bt.Strategy):
         if self._pending_exit:
             self.close(data=self.data0)
             self.close(data=self.data1)
+            self._log_close()
             self._in_long = False
             self._in_short = False
             self._pending_exit = False
@@ -104,6 +123,7 @@ class GGRStrategy(bt.Strategy):
                 else:
                     self.close(data=self.data0)
                     self.close(data=self.data1)
+                    self._log_close()
                     self._in_long = False
             return
 
@@ -114,6 +134,7 @@ class GGRStrategy(bt.Strategy):
                 else:
                     self.close(data=self.data0)
                     self.close(data=self.data1)
+                    self._log_close()
                     self._in_short = False
             return
 
@@ -133,6 +154,47 @@ class GGRStrategy(bt.Strategy):
         if self._in_long or self._in_short or self._pending_exit:
             self.close(data=self.data0)
             self.close(data=self.data1)
+            self._log_close()
             self._in_long = False
             self._in_short = False
             self._pending_exit = False
+
+
+class CointStrategy(GGRStrategy):
+    """Cointegration-method pairs trading — Engle-Granger spread, Backtrader.
+
+    Identical trade mechanics to GGRStrategy (entry/exit/time-stop, Panel B
+    delay, trade log); only the SPREAD DEFINITION differs:
+
+        spread_t = ln(P_A_t) − β·ln(P_B_t) − α
+
+    where α and β come from the formation-period Engle-Granger first-stage
+    OLS  ln(P_A) = α + β·ln(P_B) + ε.  The residual spread is stationary for
+    a cointegrated pair, so:
+
+        Entry : |spread_t| > entry_sigma × locked_sigma
+                (locked_sigma = formation-period std of the EG residual)
+        Exit  : spread crosses zero (its formation mean, since α absorbs it)
+
+    Position sizing stays dollar-neutral $1:$1 like GGRStrategy so that the
+    distance and cointegration methods are compared on the same capital
+    basis; β enters only through the signal, not the position weights.
+
+    Extra params (on top of GGRStrategy's)
+    --------------------------------------
+    beta   float  EG hedge ratio from formation OLS.
+    alpha  float  EG intercept from formation OLS.
+    """
+
+    params = (
+        ("beta", 1.0),
+        ("alpha", 0.0),
+    )
+
+    def _spread(self) -> float:
+        import math
+        p1 = self.data0.close[0]
+        p2 = self.data1.close[0]
+        if p1 <= 0 or p2 <= 0:
+            return 0.0
+        return math.log(p1) - self.p.beta * math.log(p2) - self.p.alpha
