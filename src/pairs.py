@@ -121,6 +121,84 @@ def select_top_pairs(ssd_df: pd.DataFrame, n: int = 20, offset: int = 0) -> list
     return list(zip(section["ticker1"], section["ticker2"], section["ssd"]))
 
 
+def select_cointegrated_pairs(
+    prices_window: pd.DataFrame,
+    candidates: list,
+    n: int = 20,
+    pval_threshold: float = 0.05,
+) -> tuple[list, dict]:
+    """Engle-Granger cointegration screen over SSD-pre-ranked candidate pairs.
+
+    Testing all N(N−1)/2 pairs with EG is prohibitively slow for large
+    universes, so the standard two-stage approach is used: pre-rank by SSD
+    (distance method), then run the EG test only on the top candidates.
+
+    For each candidate pair the two-step Engle-Granger procedure is applied
+    to LOG prices over the formation window:
+
+        Stage 1:  ln(P_A) = α + β·ln(P_B) + ε   (OLS)
+        Stage 2:  ADF test on the residual ε̂   (statsmodels coint)
+
+    Pairs with p-value < pval_threshold qualify; the n pairs with the
+    smallest p-values are returned.
+
+    Parameters
+    ----------
+    prices_window  : RAW price DataFrame for the formation window.
+    candidates     : list of (ticker1, ticker2, ssd) from select_top_pairs.
+    n              : number of pairs to return (default 20, as in GGR Top-20).
+    pval_threshold : EG p-value cutoff (default 0.05).
+
+    Returns
+    -------
+    selected  : list of (ticker1, ticker2, pvalue), best p-values first.
+    eg_params : dict (t1, t2) → {beta, alpha, sigma_eg, pvalue}; sigma_eg is
+                the formation-period std of the EG residual — the locked σ
+                used by CointStrategy.
+    """
+    from statsmodels.tsa.stattools import coint
+
+    results = []
+    eg_params: dict = {}
+    for item in candidates:
+        t1, t2 = item[0], item[1]
+        if t1 not in prices_window.columns or t2 not in prices_window.columns:
+            continue
+        p1 = prices_window[t1].dropna()
+        p2 = prices_window[t2].dropna()
+        common = p1.index.intersection(p2.index)
+        if len(common) < 60 or (p1.loc[common] <= 0).any() or (p2.loc[common] <= 0).any():
+            continue
+        log1 = np.log(p1.loc[common].values)
+        log2 = np.log(p2.loc[common].values)
+
+        try:
+            _, pvalue, _ = coint(log1, log2)
+        except Exception:
+            continue
+        if pvalue >= pval_threshold:
+            continue
+
+        beta, alpha = np.polyfit(log2, log1, 1)
+        resid = log1 - (alpha + beta * log2)
+        sigma_eg = float(resid.std())
+        if sigma_eg < 1e-10:
+            continue
+
+        results.append((t1, t2, float(pvalue)))
+        eg_params[(t1, t2)] = {
+            "beta": float(beta),
+            "alpha": float(alpha),
+            "sigma_eg": sigma_eg,
+            "pvalue": float(pvalue),
+        }
+
+    results.sort(key=lambda x: x[2])
+    selected = results[:n]
+    eg_params = {(t1, t2): eg_params[(t1, t2)] for t1, t2, _ in selected}
+    return selected, eg_params
+
+
 def compute_locked_sigma(norm_prices: pd.DataFrame, pairs: list) -> dict:
     """Compute σ = std(P*_A − P*_B) for each pair over the formation window.
 

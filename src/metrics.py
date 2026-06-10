@@ -27,11 +27,20 @@ def sharpe_ratio(returns: pd.Series, annualization: int = 252) -> float:
 
 
 def sortino_ratio(returns: pd.Series, annualization: int = 252) -> float:
-    """Annualized Sortino ratio (penalises only downside volatility)."""
-    downside = returns[returns < 0]
-    if len(downside) == 0 or downside.std() == 0:
-        return float("inf") if returns.mean() > 0 else 0.0
-    return float(returns.mean() / downside.std() * np.sqrt(annualization))
+    """Annualized Sortino ratio (penalises only downside volatility).
+
+    Downside deviation follows the standard definition (Sortino & van der
+    Meer 1991): sqrt(mean(min(r, 0)^2)) over ALL observations — not the
+    standard deviation of the negative subset, which both demeans the
+    losses and divides by the wrong count.
+    """
+    r = returns.dropna()
+    if len(r) == 0:
+        return 0.0
+    downside_dev = float(np.sqrt(np.mean(np.minimum(r, 0.0) ** 2)))
+    if downside_dev == 0:
+        return float("inf") if r.mean() > 0 else 0.0
+    return float(r.mean() / downside_dev * np.sqrt(annualization))
 
 
 def max_drawdown(equity_curve: pd.Series) -> float:
