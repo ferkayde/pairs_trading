@@ -56,6 +56,7 @@ class PairsTradingEnv(gym.Env):
         sampling: str = "random",
         obs_clip: float = 10.0,
         seed: int | None = None,
+        min_holding_days: int = 0,
     ):
         if not episodes:
             raise ValueError("episodes list is empty")
@@ -67,6 +68,11 @@ class PairsTradingEnv(gym.Env):
         self.risk_lambda = risk_lambda
         self.sampling = sampling
         self.obs_clip = obs_clip
+        # Anti-churn constraint: a position younger than min_holding_days bars
+        # cannot be voluntarily closed or flipped (the request is ignored, no
+        # cost charged). The terminal time-stop still force-closes. Default 0
+        # preserves the exact parity contract with simulate_pair_returns.
+        self.min_holding_days = int(min_holding_days)
         self._rng = np.random.default_rng(seed)
         self._next_ep = 0
 
@@ -160,6 +166,14 @@ class PairsTradingEnv(gym.Env):
         # 2. Apply the action at this bar's close.
         cost = 0.0
         target = _ACTION_TO_POS[int(action)]
+        if (
+            self.min_holding_days > 0
+            and self._position != 0
+            and target != self._position
+            and self._entry_bar is not None
+            and (i - self._entry_bar) < self.min_holding_days
+        ):
+            target = self._position  # too young to close/flip — hold
         if target != self._position:
             cost += 2.0 * self.commission * abs(target - self._position)
             if self._position != 0:

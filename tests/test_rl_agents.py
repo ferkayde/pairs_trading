@@ -77,6 +77,32 @@ def test_flat_agent_never_trades():
     assert agent.predict(np.ones(9, dtype=np.float32))[0] == ACTION_FLAT
 
 
+def test_ensemble_majority_vote():
+    from us_experimental.rl_agents import EnsembleAgent
+
+    class Fixed:
+        def __init__(self, a):
+            self.a = a
+
+        def predict(self, obs, state=None, episode_start=None, deterministic=True):
+            return self.a, None
+
+    obs_flat = np.zeros(9, dtype=np.float64)
+    # clear majority: 2x LONG vs 1x SHORT
+    ens = EnsembleAgent([Fixed(ACTION_LONG), Fixed(ACTION_LONG), Fixed(ACTION_SHORT)])
+    assert ens.predict(obs_flat)[0] == ACTION_LONG
+
+    # tie LONG/SHORT while long -> prefer holding the current position
+    obs_long = obs_flat.copy()
+    obs_long[5] = 1.0
+    ens = EnsembleAgent([Fixed(ACTION_LONG), Fixed(ACTION_SHORT)])
+    assert ens.predict(obs_long)[0] == ACTION_LONG
+
+    # tie LONG/SHORT while flat -> prefer FLAT... not in tie, fall back to flat
+    ens = EnsembleAgent([Fixed(ACTION_LONG), Fixed(ACTION_SHORT)])
+    assert ens.predict(obs_flat)[0] == ACTION_FLAT
+
+
 # ------------------------------------------------------- parity on synthetic
 @pytest.fixture(scope="module")
 def synth_episodes():

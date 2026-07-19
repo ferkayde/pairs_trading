@@ -44,8 +44,17 @@ def train_dqn_seed(
     buffer_size: int = 200_000,
     learning_starts: int = 5_000,
     verbose: bool = True,
+    train_commission_bps: float | None = None,
+    min_holding_days: int = 0,
 ) -> dict:
     """Train one DQN seed; checkpoint the best-validation-Sharpe policy.
+
+    Anti-churn options (spec §6 'reward hacking via cost model'):
+    train_commission_bps lets the TRAINING reward charge a higher cost than
+    the evaluation cost (commission_bps), regularizing against turnover;
+    validation/model selection always uses the real commission_bps.
+    min_holding_days applies the env's minimum-holding constraint in both
+    training and validation (it is part of the policy definition).
 
     Returns {seed, model_path, best_val_sharpe, history} where history is a
     list of {timesteps, val_sharpe, val_return_pct, val_trades} dicts.
@@ -67,9 +76,12 @@ def train_dqn_seed(
         val_eval = list(val_episodes)
 
     env = Monitor(PairsTradingEnv(
-        train_episodes, commission_bps=commission_bps,
+        train_episodes,
+        commission_bps=(train_commission_bps
+                        if train_commission_bps is not None else commission_bps),
         reward_scale=reward_scale, risk_lambda=risk_lambda,
         sampling="random", seed=seed,
+        min_holding_days=min_holding_days,
     ))
 
     model = DQN(
@@ -98,7 +110,8 @@ def train_dqn_seed(
                     progress_bar=False)
         trained += chunk
 
-        val = evaluate_policy(val_eval, SB3Agent(model), commission_bps)
+        val = evaluate_policy(val_eval, SB3Agent(model), commission_bps,
+                              min_holding_days=min_holding_days)
         history.append({
             "timesteps": trained,
             "val_sharpe": val["sharpe"],

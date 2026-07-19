@@ -57,6 +57,35 @@ class FlatAgent(BaseAgent):
         return ACTION_FLAT, None
 
 
+class EnsembleAgent(BaseAgent):
+    """Majority vote across several trained agents (variance reduction).
+
+    Tie-break: keep the current position if that action is among the tied
+    winners; otherwise go flat — when models disagree diametrically, the
+    conservative call is not to trade.
+    """
+
+    def __init__(self, agents: list[BaseAgent]):
+        if not agents:
+            raise ValueError("agents list is empty")
+        self.agents = agents
+
+    def predict(self, obs, state=None, episode_start=None, deterministic=True):
+        votes: dict[int, int] = {}
+        for a in self.agents:
+            act, _ = a.predict(obs, deterministic=deterministic)
+            votes[int(act)] = votes.get(int(act), 0) + 1
+        top = max(votes.values())
+        tied = {a for a, c in votes.items() if c == top}
+        if len(tied) == 1:
+            return tied.pop(), None
+        pos = int(round(float(obs[_POS_IDX])))
+        hold_action = {0: ACTION_FLAT, 1: ACTION_LONG, -1: ACTION_SHORT}[pos]
+        if hold_action in tied:
+            return hold_action, None
+        return ACTION_FLAT, None
+
+
 class SB3Agent(BaseAgent):
     """Wraps a trained Stable-Baselines3 model behind the common interface."""
 

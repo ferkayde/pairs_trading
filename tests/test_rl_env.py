@@ -142,6 +142,39 @@ def test_unreal_pnl_and_position_in_obs():
     assert obs[7] == pytest.approx(0.1)  # (11-10)/10 accrued
 
 
+def test_min_holding_blocks_early_close(flat_episode):
+    n = flat_episode.length  # 10 bars
+    env = env_for(flat_episode, min_holding_days=3)
+    # open at bar 0, try to close every bar after: close only allowed at bar 3
+    actions = [ACTION_LONG] + [ACTION_FLAT] * (n - 1)
+    total, infos = run_actions(env, actions)
+    # blocked closes at bars 1-2 charge nothing; close executes at bar 3
+    assert infos[1]["cost"] == 0.0 and infos[1]["position"] == 1
+    assert infos[2]["cost"] == 0.0 and infos[2]["position"] == 1
+    assert infos[3]["cost"] == pytest.approx(2 * C)
+    assert infos[3]["position"] == 0
+    assert total == pytest.approx(-4 * C)
+
+
+def test_min_holding_blocks_flip_too(flat_episode):
+    env = env_for(flat_episode, min_holding_days=4)
+    actions = [ACTION_LONG, ACTION_SHORT, ACTION_SHORT] + \
+              [ACTION_FLAT] * (flat_episode.length - 3)
+    total, infos = run_actions(env, actions)
+    assert infos[1]["position"] == 1  # flip blocked
+    assert infos[2]["position"] == 1
+
+
+def test_min_holding_does_not_block_terminal_force_close():
+    ep = make_episode([10.0] * 4, [20.0] * 4)
+    env = env_for(ep, min_holding_days=10)  # longer than the episode
+    actions = [ACTION_LONG] * 4
+    total, infos = run_actions(env, actions)
+    trades = infos[-1]["trades"]
+    assert len(trades) == 1 and trades[0]["exit_reason"] == "time"
+    assert total == pytest.approx(-4 * C)
+
+
 def test_deterministic_episode_selection(flat_episode):
     ep2 = make_episode([30.0] * 8, [40.0] * 8, p1_0=30.0, p2_0=40.0)
     env = PairsTradingEnv([flat_episode, ep2], commission_bps=COMMISSION_BPS,

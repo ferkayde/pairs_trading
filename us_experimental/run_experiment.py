@@ -37,7 +37,9 @@ if str(_ROOT) not in sys.path:
 
 from src.backtest import simulate_pair_returns  # noqa: E402
 from src.metrics import sharpe_ratio  # noqa: E402
-from us_experimental.rl_agents import FlatAgent, SB3Agent, StaticRuleAgent  # noqa: E402
+from us_experimental.rl_agents import (  # noqa: E402
+    EnsembleAgent, FlatAgent, SB3Agent, StaticRuleAgent,
+)
 from us_experimental.rl_episodes import (  # noqa: E402
     build_episodes, load_episodes, save_episodes, split_episodes,
 )
@@ -172,6 +174,10 @@ def equity_figure(test_results: dict[str, dict], rl_daily_mean: pd.Series):
     eq_rl = (1 + rl_daily_mean).cumprod()
     ax.plot(eq_rl.index, eq_rl.values, color="#d62728", lw=2.2,
             label=f"DQN (mean of {len(test_results['dqn_seeds'])} seeds)")
+    if test_results.get("ensemble") is not None:
+        eq_e = test_results["ensemble"]["equity"]
+        ax.plot(eq_e.index, eq_e.values, color="#9467bd", lw=2.0,
+                label="DQN ensemble (majority vote)")
     ax.axhline(1.0, color="#999999", lw=0.8, ls=":")
     ax.set_title("Out-of-sample test equity (2020+), net of costs")
     ax.set_ylabel("cumulative value of $1 (per-pair-leg return basis)")
@@ -197,6 +203,13 @@ def main():
     ap.add_argument("--rebuild-cache", action="store_true")
     ap.add_argument("--train-end", default="2015-01-01")
     ap.add_argument("--val-end", default="2020-01-01")
+    ap.add_argument("--train-commission-bps", type=float, default=None,
+                    help="anti-churn: cost charged in the TRAINING reward "
+                         "(evaluation always uses --commission)")
+    ap.add_argument("--min-holding-days", type=int, default=0,
+                    help="anti-churn: bars an RL position must be held before "
+                         "it can be closed/flipped (applies to the RL policy "
+                         "in training and evaluation)")
     args = ap.parse_args()
 
     args.roll_days = args.roll_days or (63 if args.quick else 21)
@@ -230,9 +243,16 @@ def main():
 
     # -------------------------------------------------------------- training
     print(f"Training DQN: {n_seeds} seeds x {timesteps} timesteps ...")
+    if args.train_commission_bps is not None:
+        print(f"  anti-churn: training reward cost {args.train_commission_bps} bps"
+              f" (evaluation {cbps} bps)")
+    if args.min_holding_days:
+        print(f"  anti-churn: minimum holding {args.min_holding_days} bars")
     seed_infos = train_seeds(
         split["train"], split["val"], seeds=list(range(n_seeds)),
         total_timesteps=timesteps, commission_bps=cbps, model_dir=MODELS,
+        train_commission_bps=args.train_commission_bps,
+        min_holding_days=args.min_holding_days,
     )
     pd.DataFrame(
         [dict(h, seed=si["seed"]) for si in seed_infos for h in si["history"]]
@@ -243,10 +263,19 @@ def main():
 
     print("Evaluating DQN seeds on test ...")
     dqn_results: dict[str, dict] = {}
+    seed_agents: list[SB3Agent] = []
     for si in seed_infos:
         agent = SB3Agent(DQN.load(si["model_path"]))
+        seed_agents.append(agent)
         dqn_results[f"dqn_seed{si['seed']}"] = evaluate_policy(
-            split["test"], agent, cbps)
+            split["test"], agent, cbps, min_holding_days=args.min_holding_days)
+
+    res_ensemble = None
+    if len(seed_agents) > 1:
+        print("Evaluating seed-ensemble (majority vote) on test ...")
+        res_ensemble = evaluate_policy(
+            split["test"], EnsembleAgent(seed_agents), cbps,
+            min_holding_days=args.min_holding_days)
 
     rows = [
         metrics_row("static_2sigma", res_static),
@@ -269,6 +298,8 @@ def main():
         "avg_holding_days": float(np.mean([r["avg_holding_days"] for r in dqn_results.values()])),
         "trades_per_episode": float(np.mean([r["trades_per_episode"] for r in dqn_results.values()])),
     })
+    if res_ensemble is not None:
+        rows.append(metrics_row("dqn_ensemble_vote", res_ensemble))
     rows.append({
         "policy": "dqn_std_across_seeds",
         "sharpe": float(np.std(seed_sharpes)),
@@ -290,15 +321,22 @@ def main():
         b = bootstrap_sharpe_diff(rl_daily_mean, base_res["daily"])
         b["comparison"] = f"dqn_mean_vs_{base_name}"
         boot_rows.append(b)
+        if res_ensemble is not None:
+            b = bootstrap_sharpe_diff(res_ensemble["daily"], base_res["daily"])
+            b["comparison"] = f"dqn_ensemble_vs_{base_name}"
+            boot_rows.append(b)
     boot = pd.DataFrame(boot_rows)
     boot.to_csv(RESULTS / "rl_bootstrap.csv", index=False)
     print(boot.to_string(index=False))
 
     # ----------------------------------------------------------- subperiods
     sub_rows = []
-    for name, daily in [("static_2sigma", res_static["daily"]),
-                        (f"static_tuned_{best_z}sigma", res_tuned["daily"]),
-                        ("dqn_mean", rl_daily_mean)]:
+    sub_specs = [("static_2sigma", res_static["daily"]),
+                 (f"static_tuned_{best_z}sigma", res_tuned["daily"]),
+                 ("dqn_mean", rl_daily_mean)]
+    if res_ensemble is not None:
+        sub_specs.append(("dqn_ensemble", res_ensemble["daily"]))
+    for name, daily in sub_specs:
         t = subperiod_table(daily, ["2022-01-01", "2024-01-01"])
         t.insert(0, "policy", name)
         sub_rows.append(t)
@@ -307,7 +345,8 @@ def main():
     # ---------------------------------------------------------------- plots
     equity_figure(
         {"static_2sigma": res_static, "static_tuned": res_tuned,
-         "tuned_label": f"static tuned ({best_z}σ)", "dqn_seeds": dqn_results},
+         "tuned_label": f"static tuned ({best_z}σ)", "dqn_seeds": dqn_results,
+         "ensemble": res_ensemble},
         rl_daily_mean,
     )
     behavior_figure(

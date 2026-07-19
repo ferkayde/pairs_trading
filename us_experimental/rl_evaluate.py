@@ -26,13 +26,14 @@ from us_experimental.rl_episodes import Episode  # noqa: E402
 
 
 def rollout_episode(
-    episode: Episode, agent: BaseAgent, commission_bps: float = 10.0
+    episode: Episode, agent: BaseAgent, commission_bps: float = 10.0,
+    min_holding_days: int = 0,
 ) -> tuple[pd.Series, list[dict]]:
     """Run one episode with the agent acting greedily; return (net daily
     returns indexed by trading dates, trade log)."""
     env = PairsTradingEnv(
         [episode], commission_bps=commission_bps, reward_scale=1.0,
-        sampling="sequential",
+        sampling="sequential", min_holding_days=min_holding_days,
     )
     obs, _ = env.reset(options={"episode_index": 0})
     pnl = np.zeros(episode.length)
@@ -67,6 +68,7 @@ def evaluate_policy(
     agent: BaseAgent,
     commission_bps: float = 10.0,
     verbose: bool = False,
+    min_holding_days: int = 0,
 ) -> dict:
     """Deterministic rollout of `agent` over all episodes + summary metrics.
 
@@ -78,7 +80,7 @@ def evaluate_policy(
     for k, ep in enumerate(episodes):
         if verbose and k % 200 == 0:
             print(f"    rollout {k}/{len(episodes)}", end="\r", flush=True)
-        rets, trades = rollout_episode(ep, agent, commission_bps)
+        rets, trades = rollout_episode(ep, agent, commission_bps, min_holding_days)
         per_episode.append(rets)
         for t in trades:
             t = dict(t)

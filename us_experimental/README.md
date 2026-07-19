@@ -42,6 +42,10 @@ sample, net of transaction costs.
 python -m pytest tests/test_rl_*.py         # from repo root
 python us_experimental/run_experiment.py --quick    # smoke run
 python us_experimental/run_experiment.py            # full: 5 seeds x 200k steps
+
+# anti-churn variant: 25 bps cost in the training reward (eval stays 10 bps)
+# + 5-bar minimum holding; also reports a majority-vote seed ensemble
+python us_experimental/run_experiment.py --train-commission-bps 25 --min-holding-days 5
 ```
 
 Outputs land in `us_experimental/results/`:
