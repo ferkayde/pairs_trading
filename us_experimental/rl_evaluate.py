@@ -63,6 +63,29 @@ def aggregate_daily(series_list: list[pd.Series]) -> pd.Series:
     return total.div(cnt.replace(0, np.nan)).fillna(0.0)
 
 
+def summarize_rollouts(
+    per_episode: list[pd.Series], trade_log: list[dict], n_episodes: int
+) -> dict:
+    """Aggregate per-episode daily returns + trade log into the standard
+    metrics dict (shared by evaluate_policy and the rolling-retrain driver)."""
+    daily = aggregate_daily(per_episode)
+    equity = (1 + daily).cumprod() if len(daily) else pd.Series(dtype=float)
+    pnls = [t["pnl"] for t in trade_log]
+    return {
+        "daily": daily,
+        "equity": equity,
+        "sharpe": sharpe_ratio(daily) if len(daily) else 0.0,
+        "total_return_pct": float((equity.iloc[-1] - 1) * 100) if len(equity) else 0.0,
+        "max_drawdown": max_drawdown(equity) if len(equity) else 0.0,
+        "n_trades": len(trade_log),
+        "win_rate": float(np.mean([p > 0 for p in pnls])) if pnls else 0.0,
+        "avg_holding_days": float(np.mean([t["holding_days"] for t in trade_log]))
+        if trade_log else 0.0,
+        "trades_per_episode": len(trade_log) / n_episodes if n_episodes else 0.0,
+        "trade_log": trade_log,
+    }
+
+
 def evaluate_policy(
     episodes: list[Episode],
     agent: BaseAgent,
@@ -88,22 +111,7 @@ def evaluate_policy(
             t["trading_start"] = ep.trading_start
             trade_log.append(t)
 
-    daily = aggregate_daily(per_episode)
-    equity = (1 + daily).cumprod() if len(daily) else pd.Series(dtype=float)
-    pnls = [t["pnl"] for t in trade_log]
-    return {
-        "daily": daily,
-        "equity": equity,
-        "sharpe": sharpe_ratio(daily) if len(daily) else 0.0,
-        "total_return_pct": float((equity.iloc[-1] - 1) * 100) if len(equity) else 0.0,
-        "max_drawdown": max_drawdown(equity) if len(equity) else 0.0,
-        "n_trades": len(trade_log),
-        "win_rate": float(np.mean([p > 0 for p in pnls])) if pnls else 0.0,
-        "avg_holding_days": float(np.mean([t["holding_days"] for t in trade_log]))
-        if trade_log else 0.0,
-        "trades_per_episode": len(trade_log) / len(episodes) if episodes else 0.0,
-        "trade_log": trade_log,
-    }
+    return summarize_rollouts(per_episode, trade_log, len(episodes))
 
 
 def tune_static_entry(
