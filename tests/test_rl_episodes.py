@@ -56,7 +56,7 @@ def test_episode_shapes_consistent(episodes):
     for ep in episodes:
         assert len(ep.p1) == len(ep.p2) == len(ep.dates) == ep.length
         assert ep.features.shape == (ep.length, len(STATIC_FEATURES))
-        assert ep.features.dtype == np.float32
+        assert ep.features.dtype == np.float64
         assert not np.isnan(ep.features).any()
         assert (ep.p1 > 0).all() and (ep.p2 > 0).all()
         assert ep.locked_sigma > 0

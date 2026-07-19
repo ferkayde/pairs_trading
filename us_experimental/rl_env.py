@@ -70,8 +70,11 @@ class PairsTradingEnv(gym.Env):
         self._rng = np.random.default_rng(seed)
         self._next_ep = 0
 
+        # float64 observations: the static-rule parity gate needs threshold
+        # decisions (z vs entry_z) made in the same precision as the reference
+        # pandas simulator. SB3 casts observations to float32 internally.
         self.observation_space = spaces.Box(
-            low=-obs_clip, high=obs_clip, shape=(N_FEATURES,), dtype=np.float32
+            low=-obs_clip, high=obs_clip, shape=(N_FEATURES,), dtype=np.float64
         )
         self.action_space = spaces.Discrete(3)
 
@@ -110,10 +113,10 @@ class PairsTradingEnv(gym.Env):
             days_in_pos = 0.0
         dyn = np.array(
             [self._position, days_in_pos, self._unreal, (T - 1 - i) / T],
-            dtype=np.float32,
+            dtype=np.float64,
         )
-        obs = np.concatenate([ep.features[i], dyn])
-        return np.clip(obs, -self.obs_clip, self.obs_clip).astype(np.float32)
+        obs = np.concatenate([np.asarray(ep.features[i], dtype=np.float64), dyn])
+        return np.clip(obs, -self.obs_clip, self.obs_clip)
 
     # ----------------------------------------------------------------- trades
     def _record_close(self, exit_bar: int, exit_reason: str) -> None:

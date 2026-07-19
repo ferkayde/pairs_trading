@@ -52,7 +52,7 @@ class Episode:
     p1_0: float               # prices at formation start (normalization base)
     p2_0: float
     locked_sigma: float       # formation std of the normalized spread
-    features: np.ndarray      # (length, len(STATIC_FEATURES)) float32
+    features: np.ndarray      # (length, len(STATIC_FEATURES)) float64
 
     @property
     def length(self) -> int:
@@ -148,7 +148,10 @@ def build_episodes(
                 p1=p1_arr, p2=p2_arr,
                 p1_0=float(p1_0), p2_0=float(p2_0),
                 locked_sigma=float(sigma),
-                features=feats.to_numpy(dtype=np.float32),
+                # float64: threshold decisions (z vs 2.0) must match the
+                # float64 arithmetic of src.backtest.simulate_pair_returns
+                # exactly — float32 rounding can flip knife-edge entries.
+                features=feats.to_numpy(dtype=np.float64),
             ))
 
         start_idx += roll_days
