@@ -48,7 +48,7 @@ from us_experimental.rl_evaluate import (  # noqa: E402
     bootstrap_sharpe_diff, evaluate_policy, rollout_episode, subperiod_table,
     summarize_rollouts, tune_static_entry,
 )
-from us_experimental.train_rl import train_seeds  # noqa: E402
+from us_experimental.train_rl import train_dqn_seed  # noqa: E402
 
 RESULTS = _HERE / "results"
 CACHE = _HERE / "cache"
@@ -129,6 +129,10 @@ def main():
                     help="episode cache (default cache/episodes_full_roll21.pkl)")
     ap.add_argument("--quick", action="store_true",
                     help="smoke run: quick cache, 2 years, 1 seed, 10k steps")
+    ap.add_argument("--resume", action="store_true",
+                    help="reuse existing per-year seed checkpoints in "
+                         "models/rolling/<year>/ and train only missing ones "
+                         "(delete a checkpoint to force its retrain)")
     args = ap.parse_args()
 
     if args.quick:
@@ -168,13 +172,22 @@ def main():
               f"val {len(sp['val'])}, test {len(sp['test'])} episodes ===",
               flush=True)
         year_dir = MODELS / "rolling" / str(year)
-        infos = train_seeds(
-            sp["train"], sp["val"], seeds=seeds,
-            total_timesteps=args.timesteps, eval_every=args.eval_every,
-            commission_bps=cbps, model_dir=year_dir,
-            train_commission_bps=args.train_commission_bps,
-            min_holding_days=args.min_holding_days,
-        )
+        infos = []
+        for s in seeds:
+            ckpt = year_dir / f"dqn_seed{s}.zip"
+            if args.resume and ckpt.exists():
+                print(f"  seed {s}: reusing existing checkpoint {ckpt.name}",
+                      flush=True)
+                infos.append({"seed": s, "model_path": ckpt, "history": []})
+                continue
+            print(f"--- training DQN seed {s} ---", flush=True)
+            infos.append(train_dqn_seed(
+                sp["train"], sp["val"], s,
+                total_timesteps=args.timesteps, eval_every=args.eval_every,
+                commission_bps=cbps, model_dir=year_dir,
+                train_commission_bps=args.train_commission_bps,
+                min_holding_days=args.min_holding_days,
+            ))
         for si in infos:
             for h in si["history"]:
                 history_rows.append(dict(h, seed=si["seed"], year=year))
